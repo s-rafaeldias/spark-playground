@@ -17,6 +17,8 @@ def count_messages(
     # df.group_df("a", "b") -> key = ("a", "b")
 
     # Get the current state
+    # TODO: can we use a `dataclass` to remove this boilerplate error-prone code?
+    # This would require to create a dataclass for a given spark `StructType` definition
     if state.exists:
         (count, values, min_ts, max_ts) = state.get
     else:
