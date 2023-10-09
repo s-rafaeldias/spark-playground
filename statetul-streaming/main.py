@@ -10,7 +10,14 @@ from pyspark.sql.streaming.state import GroupStateTimeout, GroupState
 def count_messages(
     key: tuple, data_iter: Iterable[pd.DataFrame], state: GroupState
 ) -> Iterator[pd.DataFrame]:
-    print(f"Key: {key}")
+    """
+    Count how many messages for each id has been processed during
+    the lifetime of the streaming job.
+    """
+    # `key` will be a tuple of all group by keys
+    # For example:
+    # df.group_df("a", "b") -> key = ("a", "b")
+
     count = 0
     for group_df in data_iter:
         count += len(group_df)
@@ -22,6 +29,8 @@ def count_messages(
 
     state.update((count,))
 
+    # The yield DataFrame is **not** the state itself,
+    # is just the output data from the streaming job
     yield pd.DataFrame({"id": [str(key[0])], "count": [count]})
 
 

@@ -1,4 +1,7 @@
-## How to use the new API
+# Stateful processing in Pyspark
 
-## applyInPandasWithState
-GroupState: tuple with the state to be shared between batchs
+## Running the example
+```bash
+pip install -r requirements.txt
+python main.py
+```
