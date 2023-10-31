@@ -18,8 +18,12 @@ class SensorEvent(BaseModel):
     ts: datetime
 
 
-def generate_data(n: int, t: EventType) -> [SensorEvent]:
-    sensor = random.choice(("ABC", "XYZ"))
+def generate_data(n: int, t: EventType, sensor_id: str | None = None) -> [SensorEvent]:
+    if not sensor_id:
+        sensor = random.choice(("ABC", "XYZ"))
+    else:
+        sensor = sensor_id
+
     result = []
 
     for i in range(n):
@@ -28,8 +32,8 @@ def generate_data(n: int, t: EventType) -> [SensorEvent]:
     return result
 
 
-def main(port: str, n_runs: int, t: EventType):
-    data = generate_data(n_runs, t)
+def main(sensor_id: str, port: str, n_runs: int, t: EventType):
+    data = generate_data(n=n_runs, t=t, sensor_id=sensor_id)
 
     p = Producer(
         {"bootstrap.servers": f"localhost:{int(port)}", "client.id": "data-producer"}
@@ -46,5 +50,6 @@ if __name__ == "__main__":
     port = sys.argv[1]
     n_runs = int(sys.argv[2])
     t = sys.argv[3]
+    sensor = sys.argv[4]
 
-    main(port=port, n_runs=n_runs, t=EventType(t))
+    main(sensor_id=sensor, port=port, n_runs=n_runs, t=EventType(t))

@@ -10,7 +10,7 @@ from datetime import datetime
 from pyspark.sql.streaming.state import GroupStateTimeout, GroupState
 
 LOOKUP = {
-    "ABC": {"timeout": 30_000, "threshold": 5},
+    "ABC": {"timeout": 15_000, "threshold": 5},
     "XYZ": {"timeout": 10_000, "threshold": 2},
 }
 
@@ -18,34 +18,7 @@ LOOKUP = {
 def alert_func(
     key: Tuple, data_iter: Iterable[pd.DataFrame], state: GroupState
 ) -> Iterator[pd.DataFrame]:
-    if state.hasTimedOut:
-        (sensor_id,) = key
-        (count, start_ts) = state.get
-
-        triggered = count >= LOOKUP[sensor_id]["threshold"]
-        if triggered:
-            print(
-                f"TIMEOUT {sensor_id}: ALERTTTTTTTTT!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-            )
-
-        # Clear state
-        state.remove()
-        end_ts = datetime.now()
-
-        print("Saving data to DELTA...")
-        yield pd.DataFrame(
-            {
-                "sensor_id": [sensor_id],
-                "count": [count],
-                "start_ts": [start_ts],
-                "end_ts": [end_ts],
-                "delta": [end_ts.timestamp() - start_ts.timestamp()],
-                "threshold": [LOOKUP[sensor_id]["threshold"]],
-                "triggered": [triggered],
-            }
-        )
-    else:
-        # Get the current state
+    if not state.hasTimedOut:
         (sensor_id,) = key
         print(f"New data for {sensor_id}")
 
@@ -65,8 +38,36 @@ def alert_func(
             )
 
         state.update((count, start_ts))
+        # For each new "bad" data, we increase the timeout window
         state.setTimeoutDuration(LOOKUP[sensor_id]["timeout"])
         return
+
+    (sensor_id,) = key
+    (count, start_ts) = state.get
+
+    triggered = count >= LOOKUP[sensor_id]["threshold"]
+    if triggered:
+        print(
+            f"TIMEOUT {sensor_id}: ALERTTTTTTTTT!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+        )
+
+    # Clear state
+    state.remove()
+    end_ts = datetime.now()
+
+    print("Saving data to DELTA...")
+    yield pd.DataFrame(
+        {
+            "sensor_id": [sensor_id],
+            "count": [count],
+            "start_ts": [start_ts],
+            "end_ts": [end_ts],
+            "timeout_window": [end_ts.timestamp() - start_ts.timestamp()],
+            "threshold": [LOOKUP[sensor_id]["threshold"]],
+            "triggered": [triggered],
+            "timeout_ms": [LOOKUP[sensor_id]["timeout"]],
+        }
+    )
 
 
 def main(kafka_port: str):
@@ -124,7 +125,8 @@ def main(kafka_port: str):
                         T.StructField("triggered", T.BooleanType(), True),
                         T.StructField("start_ts", T.TimestampType(), True),
                         T.StructField("end_ts", T.TimestampType(), True),
-                        T.StructField("delta", T.DoubleType(), True),
+                        T.StructField("timeout_window", T.DoubleType(), True),
+                        T.StructField("timeout_ms", T.IntegerType(), True),
                     ]
                 ),
                 stateStructType=T.StructType(
