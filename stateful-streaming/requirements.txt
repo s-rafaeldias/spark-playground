@@ -2,3 +2,8 @@ delta-spark~=2.4
 pyspark~=3.4
 pandas
 pyarrow
+polyfactory
+confluent-kafka
+notebook
+findspark
+sparkmagic

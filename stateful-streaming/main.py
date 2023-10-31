@@ -1,124 +1,159 @@
+import sys
 from pyspark.sql import SparkSession
 import pyspark.sql.types as T
+import pyspark.sql.functions as F
 from pyspark import SparkConf
 import pandas as pd
-from typing import Iterable, Iterator
+from typing import Iterable, Iterator, Tuple
 from datetime import datetime
 
 from pyspark.sql.streaming.state import GroupStateTimeout, GroupState
 
+LOOKUP = {
+    "ABC": {"timeout": 30_000, "threshold": 5},
+    "XYZ": {"timeout": 10_000, "threshold": 2},
+}
 
-def count_messages(
-    key: tuple, data_iter: Iterable[pd.DataFrame], state: GroupState
+
+def alert_func(
+    key: Tuple, data_iter: Iterable[pd.DataFrame], state: GroupState
 ) -> Iterator[pd.DataFrame]:
-    # `key` will be a tuple of all group by keys
-    # For example:
-    # df.group_df("a") -> key = ("a",)
-    # df.group_df("a", "b") -> key = ("a", "b")
+    if state.hasTimedOut:
+        (sensor_id,) = key
+        (count, start_ts) = state.get
 
-    # Get the current state
-    # TODO: can we use a `dataclass` to remove this boilerplate error-prone code?
-    # This would require to create a dataclass for a given spark `StructType` definition
-    if state.exists:
-        (count, values, min_ts, max_ts) = state.get
-    else:
-        count = 0
-        values = []
-        min_ts = datetime.now()
-        max_ts = datetime.now()
+        triggered = count >= LOOKUP[sensor_id]["threshold"]
+        if triggered:
+            print(
+                f"TIMEOUT {sensor_id}: ALERTTTTTTTTT!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+            )
 
+        # Clear state
+        state.remove()
+        end_ts = datetime.now()
 
-    for group_df in data_iter:
-        # Count number of rows for the group by key (id)
-        count += len(group_df)
-        # Keep track of all `values` for an `id`
-        # values += group_df["value"].to_list()
-
-        # Keep track of min and max timestamps seen during the
-        # streaming job
-        # TODO: add watermark conditions here for time bound state
-        tmp_max_ts = group_df["ts"].max()
-        tmp_min_ts = group_df["ts"].min()
-
-        min_ts = min_ts if min_ts < tmp_min_ts else tmp_min_ts
-        max_ts = max_ts if max_ts > tmp_max_ts else tmp_max_ts
-
-    new_state = (count, values, min_ts, max_ts)
-    state.update(new_state)
-
-    # The yield DataFrame is **not** the state itself,
-    # is just the output data from the streaming job
-    yield pd.DataFrame(
-        {
-            "id": [str(key[0])],
-            "count": [count],
-            "values": [values],
-            "min_ts": [min_ts],
-            "max_ts": [max_ts],
-        }
-    )
-
-
-spark_conf = (
-    SparkConf()
-    # .set("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0")
-    .set("spark.sql.shuffle.partitions", "2")
-    .setMaster("local[*]")
-    .setAppName("stateful-streaming")
-)
-
-with SparkSession.builder.config(conf=spark_conf).getOrCreate() as sc:
-    read_opts = {
-        "kafka.bootstrap.servers": "localhost:58776",
-        "subscribe": "pyspark",
-        "rowsPerBatch": 50,
-        "numPartitions": 2,
-        "advanceMillisPerBatch": 1000,
-    }
-
-    # df = sc.readStream.format("kafka").options(**read_opts).load()
-    # df = df.selectExpr("CAST(value AS STRING) as id", "current_timestamp() as t")
-
-    df = sc.readStream.format("rate-micro-batch").options(**read_opts).load()
-    df = df.selectExpr("value", "value % 6 AS id", "current_timestamp() as ts")
-
-    df = (
-        df
-        # .withWatermark("timestamp", "30 minutes")
-        .groupBy("id").applyInPandasWithState(
-            count_messages,
-            outputStructType=T.StructType(
-                [
-                    T.StructField("id", T.StringType(), False),
-                    T.StructField("count", T.LongType(), False),
-                    T.StructField("values", T.ArrayType(T.LongType()), False),
-                    T.StructField("max_ts", T.TimestampType(), False),
-                    T.StructField("min_ts", T.TimestampType(), False),
-                ]
-            ),
-            stateStructType=T.StructType(
-                [
-                    T.StructField("count", T.LongType(), False),
-                    T.StructField("values", T.ArrayType(T.LongType()), False),
-                    T.StructField("max_ts", T.TimestampType(), False),
-                    T.StructField("min_ts", T.TimestampType(), False),
-                ]
-            ),
-            outputMode="update",
-            timeoutConf=GroupStateTimeout.NoTimeout,
+        print("Saving data to DELTA...")
+        yield pd.DataFrame(
+            {
+                "sensor_id": [sensor_id],
+                "count": [count],
+                "start_ts": [start_ts],
+                "end_ts": [end_ts],
+                "delta": [end_ts.timestamp() - start_ts.timestamp()],
+                "threshold": [LOOKUP[sensor_id]["threshold"]],
+                "triggered": [triggered],
+            }
         )
+    else:
+        # Get the current state
+        (sensor_id,) = key
+        print(f"New data for {sensor_id}")
+
+        if state.exists:
+            (count, start_ts) = state.get
+        else:
+            count = 0
+            start_ts = datetime.now()
+
+        for group_df in data_iter:
+            count += len(group_df)
+            start_ts = min(group_df["ts"].min(), start_ts)
+
+        if count >= LOOKUP[sensor_id]["threshold"]:
+            print(
+                f"{sensor_id}: ALERTTTTTTTTT!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+            )
+
+        state.update((count, start_ts))
+        state.setTimeoutDuration(LOOKUP[sensor_id]["timeout"])
+        return
+
+
+def main(kafka_port: str):
+    spark_conf = (
+        SparkConf()
+        .set(
+            "spark.jars.packages",
+            "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,io.delta:delta-core_2.12:2.4.0",
+        )
+        .set("spark.sql.shuffle.partitions", "2")
+        .set(
+            "spark.sql.streaming.statefulOperator.checkCorrectness.enabled",
+            "false",
+        )
+        .set("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+        .set(
+            "spark.sql.catalog.spark_catalog",
+            "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+        )
+        .setMaster("local[*]")
+        .setAppName("stateful-streaming")
     )
 
-    write_opts = {
-        "path": "./out",
-        "checkpointLocation": f"/tmp/spark-playground/checkpoint/{int(datetime.now().timestamp())}",
-        "truncate": "false",
-    }
+    with SparkSession.builder.config(conf=spark_conf).getOrCreate() as sc:
+        read_opts = {
+            "kafka.bootstrap.servers": f"localhost:{int(kafka_port)}",
+            "subscribe": "example",
+        }
 
-    # Print data to console
-    (
-        df.writeStream.format("console")
-        .options(**write_opts)
-        .start(outputMode="update")
-        .awaitTermination()
-    )
+        schema = T.StructType(
+            [
+                T.StructField("event", T.StringType(), False),
+                T.StructField("sensor_id", T.StringType(), False),
+                T.StructField("ts", T.TimestampType(), False),
+            ]
+        )
+
+        df = sc.readStream.format("kafka").options(**read_opts).load()
+        df = (
+            df.withColumn("value", F.col("value").cast(T.StringType()))
+            .withColumn("value", F.from_json("value", schema))
+            .select("value.*")
+        )
+
+        df = (
+            df.filter(F.col("event") == "bad")
+            .groupBy("sensor_id")
+            .applyInPandasWithState(
+                alert_func,
+                outputStructType=T.StructType(
+                    [
+                        T.StructField("sensor_id", T.StringType(), False),
+                        T.StructField("count", T.IntegerType(), False),
+                        T.StructField("threshold", T.IntegerType(), True),
+                        T.StructField("triggered", T.BooleanType(), True),
+                        T.StructField("start_ts", T.TimestampType(), True),
+                        T.StructField("end_ts", T.TimestampType(), True),
+                        T.StructField("delta", T.DoubleType(), True),
+                    ]
+                ),
+                stateStructType=T.StructType(
+                    [
+                        T.StructField("count", T.IntegerType(), False),
+                        T.StructField("start_ts", T.TimestampType(), False),
+                    ]
+                ),
+                outputMode="append",
+                timeoutConf=GroupStateTimeout.ProcessingTimeTimeout,
+            )
+        )
+
+        x = int(datetime.now().timestamp())
+        write_opts = {
+            "path": "./table",
+            "checkpointLocation": f"/tmp/spark-playground/checkpoint/{x}",
+            "truncate": "false",
+        }
+
+        # Print data to console
+        (
+            df.writeStream.format("delta")
+            .options(**write_opts)
+            .start(outputMode="append")
+            .awaitTermination()
+        )
+
+
+if __name__ == "__main__":
+    kafka_port = sys.argv[1]
+    main(kafka_port)
